@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trò chơi Ô ăn quan P2P</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.0/socket.io.min.js"></script>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: auto;
+            min-height: 100vh;
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+        }
+        canvas {
+            border: 2px solid black;
+            background-color: white;
+            display: block;
+        }
+        #status, #roomInput, #playerNameInput, #joinButton, #roleSelect {
+            margin: 10px;
+            font-size: 16px;
+        }
+        #status {
+            color: blue;
+        }
+        #roomInput, #playerNameInput, #roleSelect {
+            padding: 5px;
+            width: 200px;
+        }
+        #historyPanel {
+            margin: 10px;
+            width: 800px;
+            max-height: 200px;
+            overflow-y: auto;
+            background-color: white;
+            border: 2px solid black;
+            padding: 10px;
+            font-size: 14px;
+        }
+        #historyPanel h3 {
+            margin: 0 0 10px 0;
+            color: blue;
+            text-align: center;
+        }
+        #historyPanel ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        #historyPanel li {
+            padding: 5px 0;
+            border-bottom: 1px solid #ccc;
+        }
+        #historyPanel li:last-child {
+            border-bottom: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>Trò chơi Ô ăn quan</h1>
+    <input id="playerNameInput" type="text" placeholder="Nhập tên người chơi">
+    <input id="roomInput" type="text" placeholder="Nhập mã phòng">
+    <select id="roleSelect">
+        <option value="player">Người chơi</option>
+        <option value="spectator">Khán giả</option>
+    </select>
+    <button id="joinButton">Tham gia</button>
+    <div id="status">Đang chờ kết nối...</div>
+    <canvas id="gameCanvas" width="800" height="550"></canvas>
+    <div id="historyPanel">
+        <h3>Lịch sử trận đấu</h3>
+        <ul id="historyList"></ul>
+    </div>
+
+    <script>
+        const socket = io('http://192.168.1.4:3000', {
+            reconnection: true,
+            reconnectionAttempts: 5,
+            reconnectionDelay: 1000
+        });
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const roomInput = document.getElementById('roomInput');
+        const playerNameInput = document.getElementById('playerNameInput');
+        const roleSelect = document.getElementById('roleSelect');
+        const joinButton = document.getElementById('joinButton');
+        const statusDiv = document.getElementById('status');
+        const historyList = document.getElementById('historyList');
+
+        const MAXX = 800;
+        const MAXY = 550;
+        const Y = 270;
+
+        let gameState = {
+            board: Array(12).fill().map(() => ({ soDan: 0, conQuan: 0 })),
+            scores: [0, 0],
+            debt: [0, 0],
+            turn: 0,
+            HienTai: 7,
+            DaChon: 0,
+            DaiDan: 0,
+            mx: 0,
+            Game: 1,
+            playerNames: ["Người chơi 1", "Người chơi 2"],
+            history: []
+        };
+        let playerId = null;
+        let peerConnection = null;
+        let dataChannel = null;
+        let role = null;
+
+        const tdd = [
+            {x: 0, y: 0}, {x: 0, y: 0}, {x: -25, y: -25}, {x: 25, y: -25},
+            {x: -25, y: 25}, {x: 25, y: 25}, {x: 0, y: -25}, {x: -25, y: 0},
+            {x: 25, y: 0}, {x: 0, y: 25}, {x: -12, y: -12}, {x: 12, y: -12}
+        ];
+
+        const tddq = [
+            {x: 0, y: 0}, {x: 20, y: -60}, {x: 20, y: -45}, {x: 20, y: -30},
+            {x: 20, y: -15}, {x: 20, y: 0}, {x: 20, y: 15}, {x: 20, y: 30}
+        ];
+
+        function initBoard() {
+            for (let i = 0; i < 12; i++) {
+                if (i % 6 === 0) {
+                    gameState.board[i].soDan = 0;
+                    gameState.board[i].conQuan = 1;
+                } else {
+                    gameState.board[i].soDan = 5;
+                }
+            }
+            gameState.HienTai = 7;
+            gameState.scores = [0, 0];
+            gameState.debt = [0, 0];
+            gameState.turn = 0;
+            gameState.Game = 1;
+            gameState.DaChon = 0;
+            gameState.DaiDan = 0;
+            gameState.mx = 0;
+            gameState.history = [];
+            drawBoard();
+            if (role === 'player') {
+                drawArrow();
+                sendGameState();
+            }
+        }
+
+        function sendGameState() {
+            if (role === 'player' && dataChannel && dataChannel.readyState === 'open') {
+                dataChannel.send(JSON.stringify(gameState));
+                socket.emit('game-state', { roomId: roomInput.value, gameState });
+            }
+        }
+
+        function updateRemain(player, stones) {
+            let yOffset = player === 0 ? 470 : 90;
+            ctx.fillStyle = 'white';
+            ctx.fillRect(100, yOffset - 20, 150, 30);
+            ctx.fillStyle = 'black';
+            ctx.font = '20px Arial';
+            ctx.fillText(`Selected: ${stones}`, 100, yOffset);
+        }
+
+        function clearRemain(player) {
+            let yOffset = player === 0 ? 470 : 90;
+            ctx.fillStyle = 'white';
+            ctx.fillRect(100, yOffset - 20, 150, 30);
+        }
+
+        function renderHistory() {
+            historyList.innerHTML = '';
+            gameState.history.forEach((move, index) => {
+                const li = document.createElement('li');
+                const time = new Date(move.timestamp).toLocaleTimeString('vi-VN');
+                li.textContent = `Lượt ${index + 1}: ${move.player} chọn ô ${move.square}, đi ${move.direction}, ăn ${move.stonesCaptured} quân (${time})`;
+                historyList.appendChild(li);
+            });
+        }
+
+        function drawBoard() {
+            ctx.clearRect(0, 0, MAXX, MAXY);
+            ctx.fillStyle = '#87CEEB';
+            ctx.fillRect(0, 0, MAXX, MAXY);
+            ctx.strokeStyle = 'gray';
+            ctx.lineWidth = 2;
+
+            ctx.beginPath();
+            ctx.moveTo(150, Y - 100);
+            ctx.lineTo(650, Y - 100);
+            ctx.moveTo(150, Y + 100);
+            ctx.lineTo(650, Y + 100);
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(150, Y, 100, Math.PI / 2, 3 * Math.PI / 2);
+            ctx.arc(650, Y, 100, -Math.PI / 2, Math.PI / 2);
+            ctx.stroke();
+            ctx.fillStyle = '#90EE90';
+            ctx.fill();
+
+            for (let i = 0; i <= 5; i++) {
+                ctx.beginPath();
+                ctx.moveTo(150 + 100 * i, Y - 100);
+                ctx.lineTo(150 + 100 * i, Y + 100);
+                ctx.stroke();
+            }
+            ctx.beginPath();
+            ctx.moveTo(150, Y);
+            ctx.lineTo(650, Y);
+            ctx.stroke();
+
+            for (let i = 0; i < 12; i++) {
+                if (i % 6 === 0) {
+                    let n = (i + 1) * 100;
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.ellipse(n, Y, 10, 20, 0, 0, Math.PI * 2);
+                    ctx.fillStyle = gameState.board[i].conQuan ? 'green' : '#90EE90';
+                    ctx.fill();
+                    ctx.stroke();
+                    ctx.restore();
+                    if (gameState.board[i].soDan > 0) {
+                        for (let j = 1; j <= gameState.board[i].soDan && j < tddq.length; j++) {
+                            ctx.save();
+                            ctx.beginPath();
+                            ctx.arc(
+                                n + (1 - Math.floor(i / 3)) * tddq[j].x,
+                                Y + tddq[j].y,
+                                3,
+                                0,
+                                Math.PI * 2
+                            );
+                            ctx.fillStyle = 'black';
+                            ctx.fill();
+                            ctx.restore();
+                        }
+                    }
+                } else {
+                    let n = (7 - Math.abs(6 - i)) * 100;
+                    let m = Y - 50 + Math.floor(i / 6) * 100;
+                    for (let j = 1; j <= gameState.board[i].soDan && j < tdd.length; j++) {
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.arc(n + tdd[j].x, m + tdd[j].y, 3, 0, Math.PI * 2);
+                        ctx.fillStyle = 'black';
+                        ctx.fill();
+                        ctx.restore();
+                    }
+                    if (gameState.DaChon === 1 && gameState.HienTai === i) {
+                        ctx.save();
+                        ctx.strokeStyle = 'red';
+                        ctx.lineWidth = 4;
+                        ctx.strokeRect(n - 48, m - 48, 96, 96);
+                        ctx.restore();
+                    }
+                }
+            }
+
+            ctx.fillStyle = 'white';
+            ctx.fillRect(100, 50, 200, 30);
+            ctx.fillRect(100, 430, 200, 30);
+            ctx.fillStyle = 'black';
+            ctx.font = '20px Arial';
+            ctx.fillText(`${gameState.playerNames[1]}: ${gameState.scores[1]}`, 100, 70);
+            ctx.fillText(`${gameState.playerNames[0]}: ${gameState.scores[0]}`, 100, 450);
+
+            if (gameState.DaChon === 1 && role === 'player') {
+                updateRemain(gameState.turn, gameState.board[gameState.HienTai].soDan);
+            }
+
+            if (!gameState.Game) {
+                ctx.fillStyle = '#87CEEB';
+                ctx.fillRect(0, 0, MAXX, MAXY);
+                ctx.fillStyle = 'black';
+                ctx.font = '24px Arial';
+                ctx.fillText(`${gameState.playerNames[1]}: ${gameState.scores[1]}`, 100, 170);
+                ctx.fillText(`${gameState.playerNames[0]}: ${gameState.scores[0]}`, 100, 250);
+                ctx.fillText(`Người thắng: ${gameState.scores[0] > gameState.scores[1] ? gameState.playerNames[0] : gameState.playerNames[1]}`, 100, 330);
+                statusDiv.textContent = `Trò chơi kết thúc! Người thắng: ${gameState.scores[0] > gameState.scores[1] ? gameState.playerNames[0] : gameState.playerNames[1]}`;
+            }
+
+            renderHistory();
+        }
+
+        function drawArrow() {
+            if (!gameState.Game || role !== 'player' || gameState.turn !== playerId) {
+                return;
+            }
+            let n = (7 - Math.abs(6 - gameState.HienTai)) * 100;
+            let k = Math.floor(gameState.HienTai / 6) * 2 - 1;
+            let m = Y + k * 110;
+            ctx.strokeStyle = 'red';
+            ctx.beginPath();
+            ctx.moveTo(n, m);
+            ctx.lineTo(n, m + 30 * k);
+            ctx.moveTo(n, m);
+            ctx.lineTo(n + 10 * k, m + 10 * k);
+            ctx.moveTo(n, m);
+            ctx.lineTo(n - 10 * k, m + 10 * k);
+            ctx.stroke();
+        }
+
+        function clearSquare() {
+            let n = (7 - Math.abs(6 - gameState.HienTai)) * 100;
+            let m = Y - 50 + Math.floor(gameState.HienTai / 6) * 100;
+            ctx.fillStyle = '#90EE90';
+            ctx.fillRect(n - 48, m - 48, 97, 97);
+        }
+
+        function setupPeerConnection() {
+            if (role !== 'player') return; // Skip WebRTC for spectators
+
+            peerConnection = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+                    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }
+                ]
+            });
+
+            dataChannel = peerConnection.createDataChannel('gameChannel');
+            dataChannel.onopen = () => {
+                statusDiv.textContent = `Kênh dữ liệu đã mở! Bạn là ${gameState.playerNames[playerId]}`;
+            };
+            dataChannel.onmessage = (event) => {
+                try {
+                    const receivedState = JSON.parse(event.data);
+                    gameState = receivedState;
+                    drawBoard();
+                    drawArrow();
+                } catch (error) {
+                    console.error('Error parsing game state:', error);
+                }
+            };
+            dataChannel.onclose = () => {
+                statusDiv.textContent = 'Kênh dữ liệu đã đóng!';
+            };
+
+            peerConnection.ondatachannel = (event) => {
+                dataChannel = event.channel;
+                dataChannel.onmessage = (event) => {
+                    try {
+                        const receivedState = JSON.parse(event.data);
+                        gameState = receivedState;
+                        drawBoard();
+                        drawArrow();
+                    } catch (error) {
+                        console.error('Error parsing game state:', error);
+                    }
+                };
+                dataChannel.onopen = () => {
+                    statusDiv.textContent = `Kênh dữ liệu đã mở! Bạn là ${gameState.playerNames[playerId]}`;
+                };
+                dataChannel.onclose = () => {
+                    statusDiv.textContent = 'Kênh dữ liệu đã đóng!';
+                };
+            };
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.emit('ice-candidate', { candidate: event.candidate, roomId: roomInput.value });
+                }
+            };
+
+            peerConnection.oniceconnectionstatechange = () => {
+                if (peerConnection.iceConnectionState === 'failed') {
+                    statusDiv.textContent = 'Kết nối P2P thất bại! Vui lòng thử lại.';
+                }
+            };
+        }
+
+        joinButton.addEventListener('click', () => {
+            const roomId = roomInput.value.trim();
+            const playerName = playerNameInput.value.trim();
+            role = roleSelect.value;
+            if (!playerName) {
+                statusDiv.textContent = 'Vui lòng nhập tên người chơi!';
+                return;
+            }
+            if (!roomId) {
+                statusDiv.textContent = 'Vui lòng nhập mã phòng!';
+                return;
+            }
+            socket.emit('join-room', { roomId, playerName, role });
+        });
+
+        socket.on('connect', () => {
+            statusDiv.textContent = 'Đã kết nối tới server!';
+        });
+
+        socket.on('room-joined', (data) => {
+            role = data.role;
+            if (role === 'player') {
+                statusDiv.textContent = `Đã tham gia phòng ${data.roomId}. Chờ người chơi thứ hai...`;
+            } else {
+                statusDiv.textContent = `Đã tham gia phòng ${data.roomId} với tư cách khán giả.`;
+            }
+        });
+
+        socket.on('game-started', (data) => {
+            if (role === 'spectator') {
+                gameState.playerNames = data.playerNames;
+                statusDiv.textContent = `Trò chơi đã bắt đầu! Bạn đang xem ${data.playerNames[0]} vs ${data.playerNames[1]}.`;
+                drawBoard();
+            }
+        });
+
+        socket.on('game-state', (data) => {
+            if (role === 'spectator') {
+                try {
+                    gameState = data.gameState;
+                    drawBoard();
+                } catch (error) {
+                    console.error('Error parsing game state:', error);
+                }
+            }
+        });
+
+        socket.on('start-game', async (data) => {
+            if (role !== 'player') return;
+            playerId = data.playerId;
+            gameState.playerNames = data.playerNames;
+            statusDiv.textContent = `Bạn là ${gameState.playerNames[playerId]}. ${playerId === 0 ? 'Bạn đi trước!' : 'Chờ đối thủ...'}`;
+            initBoard();
+            setupPeerConnection();
+
+            if (playerId === 0) {
+                try {
+                    const offer = await peerConnection.createOffer();
+                    await peerConnection.setLocalDescription(offer);
+                    socket.emit('offer', { offer: offer, roomId: roomInput.value });
+                } catch (error) {
+                    statusDiv.textContent = 'Lỗi tạo offer WebRTC!';
+                }
+            }
+        });
+
+        socket.on('offer', async (data) => {
+            if (role !== 'player') return;
+            try {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                socket.emit('answer', { answer, roomId: roomInput.value });
+            } catch (error) {
+                statusDiv.textContent = 'Lỗi xử lý offer WebRTC!';
+            }
+        });
+
+        socket.on('answer', async (data) => {
+            if (role !== 'player') return;
+            try {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+            } catch (error) {
+                statusDiv.textContent = 'Lỗi xử lý answer WebRTC!';
+            }
+        });
+
+        socket.on('ice-candidate', async (data) => {
+            if (role !== 'player') return;
+            try {
+                await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+            } catch (error) {
+                statusDiv.textContent = 'Lỗi xử lý ICE candidate!';
+            }
+        });
+
+        socket.on('room-full', () => {
+            statusDiv.textContent = 'Phòng đã đầy!';
+        });
+
+        socket.on('player-disconnected', () => {
+            statusDiv.textContent = 'Đối thủ đã ngắt kết nối!';
+        });
+
+        socket.on('error', (data) => {
+            statusDiv.textContent = `Lỗi: ${data.message}`;
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (role !== 'player') return; // Vô hiệu hóa cho khán giả
+            const currentTurn = gameState.turn;
+            if (!gameState.Game || currentTurn !== playerId) {
+                return;
+            }
+
+            switch (event.keyCode) {
+                case 37: // Left arrow
+                    if (gameState.DaChon === 0) {
+                        let validSquares = currentTurn === 0 ? [11, 10, 9, 8, 7] : [1, 2, 3, 4, 5];
+                        let currentIndex = validSquares.indexOf(gameState.HienTai);
+                        do {
+                            currentIndex = (currentIndex - 1 + validSquares.length) % validSquares.length;
+                            gameState.HienTai = validSquares[currentIndex];
+                        } while (gameState.board[gameState.HienTai].soDan === 0);
+                        drawBoard();
+                        drawArrow();
+                        sendGameState();
+                    } else {
+                        gameState.DaChon = 2;
+                        gameState.mx = currentTurn === 0 ? 1 : -1;
+                        gameState.history.push({
+                            player: gameState.playerNames[currentTurn],
+                            square: gameState.HienTai,
+                            direction: currentTurn === 0 ? 'trái' : 'trái',
+                            stonesCaptured: 0,
+                            timestamp: new Date().toISOString(),
+                            initialScore: gameState.scores[currentTurn]
+                        });
+                        handleMove(currentTurn);
+                    }
+                    break;
+                case 39: // Right arrow
+                    if (gameState.DaChon === 0) {
+                        let validSquares = currentTurn === 0 ? [11, 10, 9, 8, 7] : [1, 2, 3, 4, 5];
+                        let currentIndex = validSquares.indexOf(gameState.HienTai);
+                        do {
+                            currentIndex = (currentIndex + 1) % validSquares.length;
+                            gameState.HienTai = validSquares[currentIndex];
+                        } while (gameState.board[gameState.HienTai].soDan === 0);
+                        drawBoard();
+                        drawArrow();
+                        sendGameState();
+                    } else {
+                        gameState.DaChon = 2;
+                        gameState.mx = currentTurn === 0 ? -1 : 1;
+                        gameState.history.push({
+                            player: gameState.playerNames[currentTurn],
+                            square: gameState.HienTai,
+                            direction: currentTurn === 0 ? 'phải' : 'phải',
+                            stonesCaptured: 0,
+                            timestamp: new Date().toISOString(),
+                            initialScore: gameState.scores[currentTurn]
+                        });
+                        handleMove(currentTurn);
+                    }
+                    break;
+                case 13: // Enter
+                    if (gameState.DaChon === 0) {
+                        gameState.DaChon = 1;
+                        updateRemain(currentTurn, gameState.board[gameState.HienTai].soDan);
+                        drawBoard();
+                        drawArrow();
+                        sendGameState();
+                    } else {
+                        gameState.DaChon = 0;
+                        clearRemain(currentTurn);
+                        drawBoard();
+                        drawArrow();
+                        sendGameState();
+                    }
+                    break;
+            }
+        });
+
+        function handleMove(currentTurn) {
+            if (!gameState.Game) {
+                return;
+            }
+            gameState.DaChon = 0;
+            gameState.DaiDan = gameState.board[gameState.HienTai].soDan;
+            gameState.board[gameState.HienTai].soDan = 0;
+            clearSquare();
+            clearRemain(currentTurn);
+            let interval = setInterval(() => {
+                if (gameState.DaiDan === 0) {
+                    gameState.HienTai += gameState.mx;
+                    if (gameState.HienTai === 12) gameState.HienTai = 0;
+                    else if (gameState.HienTai === -1) gameState.HienTai = 11;
+                    if (gameState.HienTai % 6) {
+                        clearSquare();
+                        gameState.DaiDan = gameState.board[gameState.HienTai].soDan;
+                        if (gameState.DaiDan === 0) {
+                            gameState.HienTai += gameState.mx;
+                            if (gameState.HienTai === 12) gameState.HienTai = 0;
+                            else if (gameState.HienTai === -1) gameState.HienTai = 11;
+                            if (gameState.HienTai % 6 === 0 && gameState.board[gameState.HienTai].conQuan) {
+                                if (gameState.board[gameState.HienTai].soDan >= 5) {
+                                    gameState.scores[currentTurn] += (gameState.board[gameState.HienTai].soDan + 10);
+                                    gameState.board[gameState.HienTai].soDan = 0;
+                                    gameState.board[gameState.HienTai].conQuan = 0;
+                                } else {
+                                    clearInterval(interval);
+                                    nextTurn(currentTurn);
+                                    return;
+                                }
+                            } else if (gameState.board[gameState.HienTai].soDan > 0) {
+                                gameState.scores[currentTurn] += gameState.board[gameState.HienTai].soDan;
+                                gameState.board[gameState.HienTai].soDan = 0;
+                                clearSquare();
+                            }
+                            clearInterval(interval);
+                            nextTurn(currentTurn);
+                            return;
+                        }
+                        gameState.board[gameState.HienTai].soDan = 0;
+                    } else {
+                        clearInterval(interval);
+                        nextTurn(currentTurn);
+                        return;
+                    }
+                }
+                gameState.DaiDan--;
+                gameState.HienTai += gameState.mx;
+                if (gameState.HienTai === 12) gameState.HienTai = 0;
+                else if (gameState.HienTai === -1) gameState.HienTai = 11;
+                gameState.board[gameState.HienTai].soDan++;
+                drawBoard();
+                sendGameState();
+            }, 400);
+        }
+
+        function nextTurn(currentTurn) {
+            if (!gameState.Game) {
+                gameState.scores[0] -= gameState.debt[0];
+                gameState.scores[1] -= gameState.debt[1];
+                let player1Board = 0;
+                for (let i = 7; i < 12; i++) {
+                    player1Board += gameState.board[i].soDan;
+                    gameState.scores[0] += gameState.board[i].soDan;
+                    gameState.board[i].soDan = 0;
+                }
+                let player2Board = 0;
+                for (let i = 1; i < 6; i++) {
+                    player2Board += gameState.board[i].soDan;
+                    gameState.scores[1] += gameState.board[i].soDan;
+                    gameState.board[i].soDan = 0;
+                }
+                drawBoard();
+                sendGameState();
+                return;
+            }
+
+            if (gameState.history.length > 0) {
+                const lastMove = gameState.history[gameState.history.length - 1];
+                lastMove.stonesCaptured = gameState.scores[currentTurn] - (lastMove.initialScore || 0);
+                lastMove.initialScore = undefined;
+            }
+
+            gameState.turn = 1 - currentTurn;
+            let validSquares = gameState.turn === 0 ? [11, 10, 9, 8, 7] : [1, 2, 3, 4, 5];
+            let tmp = 0;
+            do {
+                gameState.HienTai = validSquares[tmp];
+                tmp++;
+            } while (gameState.board[gameState.HienTai].soDan === 0 && tmp < validSquares.length);
+
+            let allEmpty = true;
+            for (let i = 1 + 6 * gameState.turn; i < 6 + 6 * gameState.turn; i++) {
+                if (gameState.board[i].soDan > 0) {
+                    allEmpty = false;
+                    break;
+                }
+            }
+            if (allEmpty) {
+                if (gameState.scores[gameState.turn] >= 5) {
+                    gameState.scores[gameState.turn] -= 5;
+                    for (let i = 1 + 6 * gameState.turn; i < 6 + 6 * gameState.turn; i++) {
+                        gameState.board[i].soDan = 1;
+                    }
+                } else {
+                    let needed = 5 - gameState.scores[gameState.turn];
+                    gameState.debt[gameState.turn] += needed;
+                    gameState.scores[1 - gameState.turn] -= needed;
+                    gameState.scores[gameState.turn] = 0;
+                    for (let i = 1 + 6 * gameState.turn; i < 6 + 6 * gameState.turn; i++) {
+                        gameState.board[i].soDan = 1;
+                    }
+                }
+                gameState.HienTai = validSquares[0];
+            }
+
+            if (gameState.board[0].soDan === 0 && gameState.board[0].conQuan === 0 &&
+                gameState.board[6].soDan === 0 && gameState.board[6].conQuan === 0) {
+                let player1Board = 0;
+                for (let i = 7; i < 12; i++) {
+                    player1Board += gameState.board[i].soDan;
+                    gameState.scores[0] += gameState.board[i].soDan;
+                    gameState.board[i].soDan = 0;
+                }
+                let player2Board = 0;
+                for (let i = 1; i < 6; i++) {
+                    player2Board += gameState.board[i].soDan;
+                    gameState.scores[1] += gameState.board[i].soDan;
+                    gameState.board[i].soDan = 0;
+                }
+            }
+
+            let allEmptyBoard = true;
+            for (let i = 0; i < 12; i++) {
+                if (gameState.board[i].soDan > 0 || (i % 6 === 0 && gameState.board[i].conQuan)) {
+                    allEmptyBoard = false;
+                    break;
+                }
+            }
+            if (allEmptyBoard) {
+                gameState.Game = 0;
+                statusDiv.textContent = 'Trò chơi kết thúc! Toàn bộ bàn cờ đã rỗng.';
+                drawBoard();
+                sendGameState();
+                return;
+            }
+
+            drawBoard();
+            drawArrow();
+            sendGameState();
+        }
+
+        drawBoard();
+    </script>
+</body>
+</html>
